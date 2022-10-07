@@ -1,0 +1,534 @@
+---
+title: "Lab Two: TMDB Movies"
+subtitle: "Datasci 203: An Exploration of the Relationship Between the Budget and Success of a Movie"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+author: " Ifrah Javed, Ryan Brown, Kodzai Nyakurimwa, Wilford Bradford"
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+    toc_depth: 3
+urlcolor: blue
+---
+
+\newpage
+\setcounter{page}{1}
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+source('./src/data/clean_data_functions.R') # Houses data cleaning functions 
+source('./src/data/eda_functions.R') # houses eda utilities
+source('./src/get_robust_se.R')
+library(corrplot)
+library(tidyverse)
+library(ggplot2) 
+library(lmtest)
+library(sandwich)
+library(stargazer)
+library(cowplot)
+library(patchwork)
+
+set.seed(42)
+```
+
+```{r data read in, include=FALSE}
+load('./data/processed/exploratory_set.Rdata') # load exploratory set as data_exp
+load('./data/processed/train_set.Rdata') # load train set as data_train
+load('./data/processed/full_processed.RData') # load full set as data_clean
+```
+
+# Introduction 
+
+## Motivation 
+
+There are many contributing factors that go into creating a “successful” movie. Production companies, directors, and actors work very hard to create the next box office hit in theaters. Some may even work their whole lives without having a movie that is “successful”. Budget, particularly, is often presumed to have a positive association with the success of a movie, but evaluating the existence, nature, and magnitude of this relationship may prove useful in tuning budgets to maximize potential value in the future.
+
+## Research Question 
+
+Specifically, our research question is as follows,
+
+\begin{quote}
+  \textit{Does a movie's budget have an effect on its success, measured in terms of revenue?}
+\end{quote}
+
+In this instance, our exposure is budget and our response is revenue. Specifically, budget is defined as the total production budget for the movie, and revenue is defined as the net global box office revenue.
+
+# Data 
+Our data source comes from Kaggle and is titled ["The Movie Database"](https://www.kaggle.com/tmdb/tmdb-movie-metadata?select=tmdb_5000_movies.csv). This Kaggle dataset is a scrubbed export from [themoviedb.org API](https://developers.themoviedb.org/3). This source is entirely user-generated, though there are strict guidelines for contribution, defined colloquially as ["The Bible"](https://www.themoviedb.org/bible/movie?language=en-US).
+
+The dataset contains 4,083 movies spanning from 1926-2017, and has a total of 20 attributes. Some of the attributes included are: release date, genre, budget, revenue, runtime, and production companies.
+
+## Data Preprocessing and Cleaning
+
+As our data were derived from user inputs, there were a few inconsistencies to tackle. Firstly, we set a hard floor for both budget and revenue. For budget, we required that a given movie have a value greater than $1 million. We felt this was necessary to exclude low-budget films with characteristics far different from the standard movie.
+
+Next, we dropped all rows with reported revenue of $0, as we felt these were most likely representative of missing data.
+
+In this process, we noticed several outliers in which budget or revenue were mere increments of dollars rather than the expected millions. In these cases, we researched the specific movies and made corrections where needed. See the appendix for a detailed view of these cases.
+
+The impact of our filters is shown in the table below. Here "n" represents the resulting number of observations. 
+
+```{r filter.summary, results='asis', warning=FALSE}
+load('./data/processed/data_impact.Rdata') # load filter impact as data_impact
+stargazer(data_impact, summary=FALSE, header=FALSE, rownames=FALSE, type = 'latex')
+
+```
+
+There were also several JSON columns that required parsing. These columns supplied lists of given terms for multi-select fields like genre, production companies, and production countries, where multiple options may be selected. For these we converted each list of terms into a matrix of boolean dummy columns.
+
+In the case of production companies, we also added a field for the count of the number of companies involved, as we felt this might influence revenue.
+
+Production countries introduced high cardinality, so for this we used a feature mapping to reduce the feature set to a set of global regions.
+
+Lastly, to reduce cardinality in original language, we converted it to English vs. non-English, as we again felt this would capture most of the observed variance.
+
+## Data Transformations 
+
+In terms of data transformations, we chose to log transform our explanatory variable of "budget" and our dependent variable which was "revenue". As we can see in the figure below, both of these variable were right skewed. This is to be expected with monetary amounts. Prior to transforming the variables, we can see that the data is extremely right skewed. After transforming them, the distribution and spread looks to be more normal. We also transformed the variables "runtime" using a log transform and "production_compaines_n", representative of the count of production companies listed for the movie, using a pseudo-log transform, to handle zeros. By using these transformations we can see a reduction in skew for both variables. 
+
+The transformation on count of production companies, while reducing skew, seems less consistent. This transformation, however, distinctly improved our results in modeling linear trend with revenue.
+
+All of our transformed variables were right-skewed with hard floors at 0 and essentially infinite ceilings.
+
+```{r long transform plots, echo=FALSE, warning=FALSE, message=FALSE}
+log_budget_hist <- data_exp %>% 
+  ggplot(aes(x = budget)) + #log transform 
+  geom_histogram(fill='blue', alpha = 0.3) + 
+  scale_x_continuous(trans = "log") + labs(y = "Count", x = "Log(Budget)")
+
+budget_hist <- data_exp %>% 
+  ggplot(aes(x = budget)) + #log transform 
+  geom_histogram(fill='blue', alpha = 0.3) + labs(y = "Count", x = "Budget")
+
+log_revenue_hist <- data_exp %>% 
+  ggplot(aes(x = revenue)) + #log transform 
+  geom_histogram(fill='blue', alpha = 0.3) + 
+  scale_x_continuous(trans = "log") + labs(y = "Count", x = "Log(Revenue)")
+
+revenue_hist <- data_exp %>% 
+  ggplot(aes(x = revenue)) +
+  geom_histogram(fill='blue', alpha = 0.3) + labs(y = "Count", x = "Revenue")
+
+log_runtime_hist <- data_exp %>% 
+  ggplot(aes(x = runtime)) + #log transform 
+  geom_histogram(fill='blue', alpha = 0.3) + scale_x_continuous(trans = "log") + labs(y = "Count", x = "Log(Runtime)")
+
+runtime_hist <- data_exp %>% 
+  ggplot(aes(x = runtime)) +
+  geom_histogram(fill='blue', alpha = 0.3) + labs(y = "Count", x = "Runtime")
+
+log_production_hist <- data_exp %>% 
+  ggplot(aes(x = production_companies_n)) + #log transform 
+  geom_histogram(fill='blue', alpha = 0.3) + scale_x_continuous(trans = "pseudo_log") + labs(y = "Count", x = "Pseudo-Log(Production Company Count)")
+
+production_hist <- data_exp %>% 
+  ggplot(aes(x = production_companies_n)) +
+  geom_histogram(fill='blue', alpha = 0.3) + labs(y = "Count", x = "Production Company Count")
+
+
+figure_1 <- plot_grid(budget_hist, log_budget_hist, revenue_hist,log_revenue_hist , runtime_hist, log_runtime_hist, production_hist,log_production_hist,   
+          ncol = 2, nrow = 4)
+figure_1
+```
+
+# Modeling
+
+## Research Design 
+
+Our research design is centered on evaluating the relationship/effect that a movie's budget has on its success in terms of revenue. Both of these variables, once log-transformed, are roughly normal in their distributions. 
+
+In an attempt to make our model more generalizable to unobserved data, we have split our frame into evaluation and train sets using a 40/60 ratio. We will conduct all of our EDA on the exploration set, then train and evaluate our models on the remaining train set. In the future we may also test our residuals on a third test set.
+
+Our train set is comprised of `r scales::comma_format()(nrow(data_train))` rows, which in this case are movies, and as such we will be using large-sample assumptions. This observation count, however, is a tad inflated due to the high cardinality of our data. Some of the low-positive-frequency dummy columns added in latter models may not be as robust as they seem, though our analysis is restricted to evaluating our exposure, budget.
+
+We will start with a very basic model and iteratively add features, using partial F-tests to determine whether the additions are worthwhile.
+
+## Model One 
+
+The first model we examined was a base model with log transformations applied to both the explanatory and dependent variable. Justification for these transformations is given in Section 2.3: Data Transformations.
+
+In the visualization below, we examine the relationship between these two features. Note the distinctly linear trend observed across the full domain of budget. There is some curvature, but this appears to be most heavily concentrated along the tails of our respective distributions.
+
+```{r model one visualizations, fig.height=4.5, fig.width=6, message=FALSE, warning=FALSE}
+#trend between budget and revenue 
+plot_revenue_budget(data_exp)
+```
+\newline This first model takes on the following form: 
+\[ 
+log(revenue) = \beta_{0} + \beta_{1} log(budget) 
+\]
+
+```{r model one, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+model_one <- lm(data=data_train, log(revenue) ~ log(budget))
+```
+
+This first model returned an Adjusted $R^2$ of `r round(summary(model_one)$adj.r.squared,4)`. The p-value for budget was `r formatC(coeftest(model_one, vcov = sandwich::vcovHC)[2,4], format = "e", digits = 1)`. Based on this, we reject the null hypothesis that the coefficient for budget is zero.
+
+## Model Two
+For the second model, we chose to add in some preliminary control variables. 
+
+Firstly, we chose to add in year as a way to control for inflation and changes over time.
+
+We then chose to add in runtime, as longer movies may require a higher budget, as more capital and time is needed to produce them. Longer movies may also attract more interest and impact revenue.
+
+We examine the distributions for each field below.
+
+```{r model two visualizations, warning=FALSE, echo=FALSE, message=FALSE, warning=FALSE, fig.height=3}
+#year vs log revenue 
+data_exp %>% 
+  ggplot(aes(x=lubridate::year(release_date), y=revenue)) +
+  geom_density2d() +
+  geom_smooth() +
+  scale_y_continuous('Revenue',
+                     trans='log', labels = scales::unit_format(prefix = '$',
+                                                               unit = 'M',
+                                                               scale = 1e-6)) +
+  scale_x_continuous('Year') +
+  labs(title = 'Revenue by Year of Release')
+```
+Year appears to be somehwat linearly associated with revenue, though there is a lot of skew towards the edges of each respective distribution. These could be indicative of outliers, or lesser observation counts.
+
+``` {r model two visualizations 2, warning=FALSE, echo=FALSE, message=FALSE, warning=FALSE, fig.height=3}
+# runtime vs  log revenue 
+data_exp %>% 
+  ggplot(aes(x=runtime, y=revenue)) +
+  geom_density2d() +
+  geom_smooth() +
+  scale_y_continuous('Revenue',
+                     trans='log', labels = scales::unit_format(prefix = '$',
+                                                               unit = 'M',
+                                                               scale = 1e-6)) +
+  scale_x_continuous('Runtime', trans = 'log') +
+  labs(title = 'Revenue by Runtime')
+```
+Runtime appears to exhibit a weak, albeit present, linear association with revenue, though this again presents some skew towards the extremities of the domain.
+
+```{r model two, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+data_train$release_year <- lubridate::year(data_train$release_date)
+model_two_a <- lm(data=data_train, log(revenue) ~ log(budget) + release_year)
+model_two_b <- lm(data=data_train, log(revenue) ~ log(budget) + log(runtime) + release_year)
+
+f_test_1 <- waldtest(model_one, model_two_a, vcov = sandwich::vcovHC)
+f_test_2 <- waldtest(model_two_a, model_two_b, vcov = sandwich::vcovHC)
+```
+
+The first phase of this second model, model 2.a, takes on the following form: 
+\[ 
+log(revenue) = \beta_{0} + \beta_{1} log(budget) + \beta_{2} release.year 
+\]
+
+After adding release year, our Adjusted $R^2$ improves to `r round(summary(model_two_a)$adj.r.squared,4)`. The p-value for release year in a model just adding it to the previous was `r formatC(coeftest(model_two_a, vcov = sandwich::vcovHC)[3,4], format = "e", digits = 1)`. In this single addition model, our partial F-test, relative to the fist model, returns the same p-value. Thus, we can reject the null hypothesis that the coefficient for release year is zero.
+
+The second phase of this second model, model 2.b, takes on the following form: 
+\[ 
+log(revenue) = \beta_{0} + \beta_{1} log(budget) + \beta_{2} release.year + \beta_{3} log(runtime)
+\]
+
+In repeating the same procedure to add runtime, our Adjusted $R^2$ only improved to `r round(summary(model_two_b)$adj.r.squared,4)`. This time, our partial F-test p-value, relative to the last significant model (adding year), was `r round(coeftest(model_two_b, vcov = sandwich::vcovHC)[3,4], 2)`. Thus, we fail to reject the null hypothesis that the coefficient for runtime is zero.
+
+## Model Three 
+
+In the third phase, we decided to take a look at additional control variables. These variables were genres, production regions, and whether English was the original language. Each of these features has a theoretical association with revenue. Action movies, for instance, may produce greater revenue on average, and also may require increased financing for special effects. Regions and language are more regional. We aim to add these to control for regional and cultural differences in both supply and demand.
+
+In order to do this we created three smaller models and ran partial F-tests to compare which controls we should keep.
+
+We examine the distributions for each of these categorical fields below.
+
+```{r model three visualizations, warning=FALSE, echo=FALSE, message=FALSE, warning=FALSE, fig.height=3.5}
+# Revenue by genre
+summary_genres = get_stats(data_exp, 'genres', 'revenue')
+plot_means(summary_genres %>% filter(n>5), 'genres', 'revenue', 'Genre',
+           fill = 'blue', alpha=0.3) +
+  labs(title = 'Mean Revenue by Genre',
+       subtitle = 'Ordered by count')
+
+```
+There are some obvious trends here with genres like Animation, Adventure, Fantasy, and others presenting averages distinctly above that of others. Others like Documentaries seem to lag behind.
+
+``` {r model three visualizations 2, warning=FALSE, echo=FALSE, message=FALSE, warning=FALSE, fig.width=10, fig.height=3.7}
+# Revenue by region 
+summary_regions = get_stats(data_exp, 'production_regions', 'revenue')
+plot_means(summary_regions %>% filter(n>5), 'production_regions', 'revenue', 'Production Region',
+           fill = 'blue', alpha=0.3) +
+  labs(title = 'Mean Revenue by Region',
+       subtitle = 'Ordered by count') +
+
+# Revenue by english or not 
+data_exp %>% group_by(english_original_language) %>%
+  summarise(n = n(),
+            mean = mean(revenue),
+            `std. dev.` = sd(revenue)) %>%
+  ggplot(aes(x=reorder(english_original_language, n), y=mean)) +
+  geom_bar(stat='identity', width = 0.3, fill = 'blue', alpha = 0.3) +
+  geom_errorbar(aes(ymin=mean-`std. dev.`/sqrt(n), 
+                    ymax=mean+`std. dev.`/sqrt(n)), width=.05) +
+  coord_flip() +
+  labs(title = 'Mean Revenue by English Original Language',
+       subtitle = 'Ordered by count',
+       x = '',
+       y = 'Mean revenue',) +
+  scale_y_continuous(labels = scales::unit_format(prefix = '$',
+                                                  scale = 1e-6,
+                                                  accuracy = 1,
+                                                  unit = 'M'))
+```
+We see a similar trend with regions, as Oceana appears to have higher average revenue than other regions. It is important to note, however, this dataset is imbalanced, and most movies are produced in North America. English as the original language also shows a distinct trend, but again, the data are highly imbalanced.
+
+```{r model three, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+model_three_a <- lm(data = data_train, log(revenue) ~ log(budget) + release_year + genres.Action + genres.Adventure + genres.Animation + genres.Comedy + genres.Crime + genres.Documentary + genres.Drama + genres.Family + genres.Fantasy + genres.Foreign + genres.History + genres.Horror + genres.Music + genres.Mystery + genres.Romance + genres.ScienceFiction + genres.Thriller + genres.War + genres.Western)
+
+model_three_a_ftest <- waldtest(model_two_a, model_three_a, vcov = sandwich::vcovHC)
+
+model_three_b <- lm(data = data_train, log(revenue) ~ log(budget) + release_year + genres.Action + genres.Adventure + genres.Animation + genres.Comedy + genres.Crime + genres.Documentary + genres.Drama + genres.Family + genres.Fantasy + genres.Foreign + genres.History + genres.Horror + genres.Music + genres.Mystery + genres.Romance + genres.ScienceFiction + genres.Thriller + genres.War + genres.Western + `production_regions.North America` + `production_regions.Western Europe` + production_regions.Oceana + `production_regions.Central and E. Asia` + `production_regions.South Asia` + `production_regions.Central and E. Europe` + `production_regions.Central and S. America` + `production_regions.Middle East and N. Africa` + `production_regions.Sub-saharan Africa`)
+
+model_three_b_ftest <- waldtest(model_three_a, model_three_b, vcov = sandwich::vcovHC)
+
+model_three_c <- lm(data = data_train, log(revenue) ~ log(budget) + release_year + english_original_language  + genres.Action + genres.Adventure + genres.Animation + genres.Comedy + genres.Crime + genres.Documentary + genres.Drama + genres.Family + genres.Fantasy + genres.Foreign + genres.History + genres.Horror + genres.Music + genres.Mystery + genres.Romance + genres.ScienceFiction + genres.Thriller + genres.War + genres.Western)
+
+model_three_c_ftest <- waldtest(model_three_a, model_three_c, vcov = sandwich::vcovHC)
+```
+
+Our first model of the third phase add genres, and is defined as follows:
+
+Model 3.a: 
+\[
+  log(revenue) = \beta_{0} + \beta_{1} log(budget) + \beta_{2} release.year + \beta_{3...n} genre_{1...n}
+\]
+
+After adding genres, our Adjusted $R^2$ improves to `r round(summary(model_three_a)$adj.r.squared,4)`. Our partial F-test relative to the model adding release year return a p-value of `r formatC(model_three_a_ftest[2,4], format='e', digits=1)`, so we can reject the null hypothesis that the coefficients for genres are all zero.
+
+Next, we move to the next set of variables, production regions:
+
+Model 3.b: 
+\[
+  log(revenue) = \beta_{0} + \beta_{1} log(budget) + \beta_{2} release.year + \beta_{3...n} genre_{1...n} + \beta_{4...n} production.regions_{1...n}
+\]
+
+In attempting to add production regions, we observe a partial F-test p-value of `r round(model_three_b_ftest[2,4], 2)`, relative to the previous model adding genres, so we fail to reject the null hypothesis that the coefficients for regions are also non-zero.
+
+Lastly, we add whether the original language was English, defined as follows,
+
+Model 3.c: 
+\[
+  log(revenue) = \beta_{0} + \beta_{1} log(budget) + \beta_{2} release.year + \beta_{3...n} genre_{1...n} + \beta_{4...n} original.language.english_{1...n}
+\]
+
+For 3.c, our partial F-test relative to the last confirmed model adding genres, 3.a, returns a p-value of `r round(model_three_c_ftest[2,4], 2)`. Thus, we again fail to reject the null hypothesis that this coefficient is zero.
+
+## Model Four
+
+The fourth phase added in a few more controls. Firstly, we will test count of production companies, then try specific, high frequency companies with at least 20 movies produced. We feel this threshold is neccesary as without reduction, we would add thousands of features to the existing model.
+
+Production companies in general have a logical association with both revenue and budget. Companies with more financing may have higher budgets on average and also produce more revenue from the goodwill of their brands.
+
+Below, we examine the associated distributions.
+
+```{r model four visualizations, warning=FALSE, echo=FALSE, message=FALSE, warning=FALSE, fig.height=3}
+# load company id map as company_map
+load('./data/mappings/company_id_map.RData')
+
+# revenue by count of production companies 
+data_exp %>% 
+  filter(production_companies_n < 15) %>%
+  ggplot(aes(x=production_companies_n, y=revenue)) +
+  geom_density2d() +
+  geom_smooth(method="gam", formula = y ~ s(x, bs = "cs", k=5)) +
+  scale_x_continuous('Count of production companies', n.breaks = 14,
+                     trans = 'pseudo_log') +
+  scale_y_continuous('Revenue', trans = 'log',
+                     labels = scales::unit_format(prefix = '$',
+                                                  unit = 'M',
+                                                  scale = 1e-6)) +
+  labs(title = 'Revenue by Count of Production Companies',
+       caption = 'Filtered 3 movies above 14')
+```
+
+Here, there is somewhat of a positive association between count of production companies and revenue, at least visually. There is a distinct curvature to this relationship, however. This skew is most pronounced towards the higher end of our data, perhaps indicating that high positive values are either rare or different from standard movies.
+
+```{r model four visualizations 2, warning=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+# Revenue by company
+summary_companies = get_stats(data_exp, 'production_companies', 'revenue')
+summary_companies = summary_companies %>% filter(n>20) %>% 
+  inner_join(company_map %>% select(id, name), by=c('production_companies'='id')) %>%
+                          mutate(id = production_companies,
+                                 production_companies = name) %>%
+  select(-name)
+plot_means(summary_companies, 
+           'production_companies', 'revenue', 'Production Company',
+           fill = 'blue', alpha=0.3) +
+  labs(title = 'Mean Revenue by Production Company',
+       subtitle = 'Ordered by count')
+```
+For production companies, the most pronounced trend is with Disney, as their mean revenue is substantially higher than other companies. This tracks with our own a priori assumptions about Disney in general, as they operate under the wing of an expansive franchise. We have chosen to only display those with at least 20 observations, as estimates for averages with less observations present a lot of skew.
+
+```{r model four, include=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+pseudoLog <- function(x, sigma=1, base=exp(1)) {
+  asinh(x/(2 * sigma))/log(base)
+}
+
+model_four_a <- lm(data = data_train, log(revenue) ~ log(budget) + release_year + pseudoLog(production_companies_n) + genres.Action + genres.Adventure + genres.Animation + genres.Comedy + genres.Crime + genres.Documentary + genres.Drama + genres.Family + genres.Fantasy + genres.Foreign + genres.History + genres.Horror + genres.Music + genres.Mystery + genres.Romance + genres.ScienceFiction + genres.Thriller + genres.War + genres.Western)
+
+model_four_a_ftest <- waldtest(model_three_a, model_four_a, vcov = sandwich::vcovHC)
+
+model_four_b <- lm(data = data_train, log(revenue) ~ log(budget) + release_year + pseudoLog(production_companies_n) + genres.Action + genres.Adventure + genres.Animation + genres.Comedy + genres.Crime + genres.Documentary + genres.Drama + genres.Family + genres.Fantasy + genres.Foreign + genres.History + genres.Horror + genres.Music + genres.Mystery + genres.Romance + genres.ScienceFiction + genres.Thriller + genres.War + genres.Western + production_companies.33 + production_companies.6194 + production_companies.4 + production_companies.306 + production_companies.5 + production_companies.12 + production_companies.7295 + production_companies.2 + production_companies.441 + production_companies.9195 + production_companies.8411 + production_companies.60 + production_companies.27 + production_companies.79 + production_companies.14 + production_companies.444 + production_companies.508 + production_companies.1632 + production_companies.694 + production_companies.7405)
+
+model_four_b_ftest <- waldtest(model_four_a, model_four_b, vcov = sandwich::vcovHC)
+
+model_four_c <- lm(data = data_train, log(revenue) ~ log(budget) + release_year + genres.Action + genres.Adventure + genres.Animation + genres.Comedy + genres.Crime + genres.Documentary + genres.Drama + genres.Family + genres.Fantasy + genres.Foreign + genres.History + genres.Horror + genres.Music + genres.Mystery + genres.Romance + genres.ScienceFiction + genres.Thriller + genres.War + genres.Western + production_companies.33 + production_companies.6194 + production_companies.4 + production_companies.306 + production_companies.5 + production_companies.12 + production_companies.7295 + production_companies.2 + production_companies.441 + production_companies.9195 + production_companies.8411 + production_companies.60 + production_companies.27 + production_companies.79 + production_companies.14 + production_companies.444 + production_companies.508 + production_companies.1632 + production_companies.694 + production_companies.7405)
+
+model_four_c_ftest <- waldtest(model_three_a, model_four_c, vcov = sandwich::vcovHC)
+model_four_b_ftest_retest <- waldtest(model_four_c, model_four_b, vcov = sandwich::vcovHC)
+```
+
+Model 4.a: The first model of our fourth phase, adding count of production companies is defined as follows: 
+\[ 
+log(revenue) = \beta_{0} + \beta_{1} log(budget) + \beta_{2} release.year + \beta_{3...n} genre_{1...n} + \beta_{4} pseudo.log(production.companies.count)
+\]
+
+After adding the count of production companies, our Adjusted $R^2$ improves to `r round(summary(model_four_a)$adj.r.squared,4)`. Our partial F-test p-value, relative to the previous model adding genres, was `r round(model_four_a_ftest[2,4], 4)`, so we can reject the null hypothesis that the coefficient for count of production companies is zero.
+
+Model 4.b: Our second step, adding production companies with at least 20 observations is defined as follows: 
+$$
+\begin{aligned}
+ log(revenue) = \beta_{0} &+ \beta_{1} log(budget) + \beta_{2} release.year + \beta_{3...n} genre_{1...n} + \beta_{4} pseudo.log(production.companies.count) \\
+ &+ \beta_{5...n} production.companies_{1...n}
+\end{aligned}
+$$
+
+After adding specific production companies with at least 20 observations, our Adjusted $R^2$ again improves to `r round(summary(model_four_b)$adj.r.squared,4)`. With this addition, our F-test p-value, relative to 4.a, is `r formatC(model_four_b_ftest[2,4], format = 'e', digits=1)`, so we can reject the null hypothesis that the coefficient for all of the production companies is collectively zero. We also note that our previously tested coefficient, count of production companies, loses its significance. This may suggest multicollinearity between these fields.
+
+With this in mind, we will test a final model retaining production companies and dropping count, defined as such:
+
+Model 4.c:
+\[ 
+log(revenue) = \beta_{0} + \beta_{1} log(budget) + \beta_{2} release.year + \beta_{3...n} genre_{1...n} + \beta_{4...n} production.companies_{1...n}
+\]
+
+After dropping count, our Adjusted $R^2$ reduces to `r round(summary(model_four_c)$adj.r.squared,4)`. With this change, our F-test p-value, relative to the previously retained model, is `r formatC(model_four_c_ftest[2,4], format = 'e', digits=1)`, so we can again reject the null hypothesis that the company coefficients are zero. 
+
+We also tested this last model against the previous model including count of production companies. Here the F-test p-value was `r round(model_four_b_ftest_retest[2,4], 4)`, and we fail to reject the hypothesis that the coefficient for count is zero. Again, this suggests multicollinearity, so we will take the more granular features in companies and remove count.
+
+# Results
+## Model Comparison 
+
+```{r model comparison, results='asis', echo=FALSE, message=FALSE, warning=FALSE}
+stargazer(
+  model_one, model_two_a, model_three_a, model_four_c,
+  type = 'latex',
+  header = FALSE,
+  column.labels = c('1', '2a', '3a', '4c'),
+  se = list(get_robust_se(model_one), get_robust_se(model_two_a),get_robust_se(model_three_a),
+            get_robust_se(model_four_c)),
+  omit = c('^genres.', '^production_companies.'),
+  keep.stat = c('n', 'adj.rsq', 'ser'),
+  add.lines=list(c('Control genres', 'N', 'N', 'Y', 'Y'),
+                 c('Control companies', 'N', 'N', 'N', 'Y'),
+                 c('Partial F-test', '', 
+                   paste0(round(f_test_1[2,3],2), '***'),
+                   paste0(round(model_three_a_ftest[2,3],2), '***'),
+                   paste0(round(model_four_c_ftest[2,3],2),'***')
+                   ),
+                 c('Partial base', '', '1', '2.a', '3.a', '4.a', '3.a')))
+```
+
+
+As discussed above, we iteratively added features, or ranges of dummy features in some cases, and used partial F-tests to determine whether we could reject the null hypothesis that the coefficients were zero. The one backwards revision was when we first added count of production companies, then the companies themselves, and noticed the p-value for the former coefficient dropped to insignificant. This encouraged us to retain only the companies and drop the count of companies.
+
+Our final model is as follows:
+\[ 
+log(revenue) = \beta_{0} + \beta_{1} log(budget) + \beta_{2} release.year + \beta_{3...n} genre_{1...n} + \beta_{4...n} production.companies_{1...n}
+\]
+
+It is important to note that we used robust standard errors in all of our tests to control for heteroscedasticity.
+
+In our final model, and really all of our models, our coefficient for budget remained signifcant with a very low p-value, far under 5%. Our large data-set could influence this value.
+
+Our practical significance is clear; for every 1% increase in budget, we can expect revenue to increase by 0.927%.
+
+This seems to be roughly uniform. If you increase budget, you can practically expect revenue to increase by almost the same amount, at least in holding the given covariates constant.
+
+Our final adjusted $R^2$ was 43.4%, meaning our model explains roughly 43% of the total variance in revenue, penalizing feature additions. 
+
+# Limitations
+## Statistical Limitations: Large-Sample Assumptions
+There are two different large-sample assumptions to evaluate for our research design which are:
+(1) Independent and Identically Distributed (I.I.D.) Data 
+(2) A Unique BLP Exists 
+
+### Evaluation of Assumption One: I.I.D Data 
+
+The final cleaned dataset is not considered I.I.D data. There are multiple dependencies throughout our dataset. The first is that the there are many movies in our dataset that are made by the same production companies. This creates dependency between movies with regards to release schedules and allocation budget. 
+
+In addition, many movies are dependent on each other with respect to release date. For example, in order to maximize revenue, a highly anticipated movie would not be released the same day as another highly anticipated move. 
+
+The dataset also has movies that are sequels. These movies' release dates, past success/budget are all dependent on each other.
+
+Lastly, our sample is biased towards successful movies, as these are searched and updated frequently. Failures are more likely to be omitted.
+
+### Evaluation of Assumption Two: A Unique-BLP Exists
+
+This second assumption requires no perfect collinearity between the variables in the final model. Every variable in our final model has an associated coefficient as we can see in the table in the Results section. If any of the variables from the model had been dropped by R, this would indicate perfect collinearity, as otherwise, the model would not converge. As such we can conclude that there is a unique BLP. In addition to this, we have transformed our variables to control for "fat tails", which we can see in the Data Transormation section. This proves that a BLP does indeed exist. 
+
+## Structural Limitations: Omitted-Variable Bias 
+
+There are two primary omitted variables that we would have wanted to include in our model. 
+
+One of the omitted variables in our model are the actors in each movie. If a movie has a cast with high-profile celebrities it would most likely have a higher budget (well known celebrities have higher salaries) and it would increase revenue as people tend to want to watch movies with recognizable names. By adding in a variable representing the popularity of actors in a movie the bias would move away from zero.
+
+A third omitted variable is whether or not a movie is based on something that is already popular (specifically book series, biographies and high profile criminal cases). For example, if the movie is based off of a very popular book series, there would be a positive relationship with budget (as the production companies would need to buy the rights to use the content) and there would be a positive relationship with revenue as fans of the book series expand the target audience. Including this variable would move the bias away from zero. 
+
+## Shared Ancestors
+
+Our original causal graph, including controls whose $H_0$s we failed to reject in the current analysis is as follows:
+![half-size image](images/dagitty-model-movies.png){#id .class width=100% height=100%}
+In this image, it is clear there are many, *many* interactions within our feature set. As this is not a perfect world with perfect experiments, and we are relying instead on observational data, this is oftern the case. The main problem here is that there may be shared ancestors between our exposure and response. This could bias our coefficient estimate and invalidate the causality of our analysis.
+
+## Multicollinearity
+
+Along with our interactions, many of our dummy fields are associated with one another. The similarity matrix below demonstrates this for genres in particular.
+
+```{r similarity.matrix, echo=FALSE, message=FALSE, warning=FALSE}
+# show interactions
+similarity_plot(data_exp, 'genres', 'Genres', 
+                col_lst = NA,
+                label_set = NA,
+                obs_lim = 5)
+```
+
+This multicollinearity could skew coefficients for genres in particular. If these interactions extend to other movie characteristics, this could, in turn, extend to budget. That said our overall fit should hold. In the future, we may want to explore MCA as a means of reducing our feature set.
+
+# Conclusion
+
+## Summary
+
+In our analysis, we parsed user-inputs into neat orthogonal sets with which to evaluate the impact of budget on revenue. Each step in our process was intentional and methodical, and allowed us to reject the null hypothesis that there is no association between budget and revenue. Given the aforementioned shared ancestors and extensive interactions betwee our exposure and covariates, we cannot definitively say there is a *causal* relationship between budget and revenue.
+
+That said, when holding each provided covariate constant, we could expect a 0.927% increase in revenue for every 1% increase in budget, a relationship of nearly 1-to-1. We achieve an adjusted $R^2$ value of 43.4%.
+
+This data is not necessarily actionable, however, as this model is more explanatory than predictive or prescriptive. This is something we would want to expand on in the future.
+
+## Further Study 
+
+For future study there are more variables that can be added that were not available in this dataset. For example, one of them would be the MPAA movie rating. Movies that are rated PG-13 movies have a much larger pertinent audience than movies that are rated R, since only a subset of the population are watching them. 
+
+We also would want to include data on actors in movies and their popularity. We could create a binary variable that identifies whether or not a movie had a popular celebrity in their cast. A popular celebrity could be a Top 10 actor in the year the movie was released. 
+
+Conducting additional analysis where we stratify our samples by things such as genre and production company could also be useful in an iterative manner. 
+
+Lastly, our dataset is open source, so in the future, we may want to standardize fields or pull from multiple sources. In line with this, we could also try to conduct experiments with given producers to map financial trends against fixed controls.
+
+\newpage
+
+# Appendix
+
+## Manual Budget and Revenue Corrections
+``` {r corrections.summary, results = 'asis', type='latex', warning=FALSE, message=FALSE, echo=FALSE}
+load('./data/processed/rev_budget_corrections.Rdata') # load as corrections_summary
+colnames(corrections_summary) <- c('id', 'title', 'release date', 'corrected budget', 'corrected revenue',
+                                   'original revenue', 'original budget')
+corrections_summary <- corrections_summary %>%
+  mutate_at(vars(-c(id, title, `release date`)), funs(. %>% scales::dollar())) %>%
+  select(id, title, `release date`, `original revenue`, `original budget`,
+         `corrected revenue`, `corrected budget`)
+knitr::kable(corrections_summary)
+```
